@@ -1,0 +1,216 @@
+# Modèle de RAG pour le devoir de Generative IA:
+
+
+# Tout d'abord, mise en place de la clef utilisée:
+
+from dotenv import load_dotenv
+import os
+import os
+import openai
+import sys
+from langchain_community.document_loaders import PyPDFLoader
+
+
+from dotenv import load_dotenv, find_dotenv
+_ = load_dotenv(find_dotenv()) # read local .env file
+
+
+
+
+# Etape 1: Ingestion des documents:
+#----------------------------------
+
+loader1 = PyPDFLoader("PDF_cours_informatique/IUT.pdf")
+loader2 = PyPDFLoader("PDF_cours_informatique/Architecture-ordinateur.pdf")
+loader3 = PyPDFLoader("PDF_cours_informatique/assembleur.pdf")
+loader4 = PyPDFLoader("PDF_cours_informatique/constitution-ordinateur.pdf")
+pages_iut = loader1.load()
+pages_architecture = loader2.load()
+pages_assembleur = loader3.load()
+pages_constitution = loader4.load()
+
+# Rassemblement des 4 documents dans une seule liste pour les traitements ultérieurs: 
+# La méthode avec "*pages_" permet de déplier chaque liste et de l'ajouter 
+pages = [*pages_iut, *pages_architecture, *pages_assembleur, *pages_constitution]
+
+
+# Etape 2: Nettoyage des corpus:
+#----------------------------------
+# Ici pages est une liste d'objet, chacun représentant un document.
+# Nous nettoyons le corpus pour éviter les tokens inutiles et rendre le texte plus clair.
+
+def clean_text(text):
+    text = text.replace("\xa0", " ")
+    text = text.replace("\n", " ")
+    text = " ".join(text.split())
+    return text
+
+for doc in pages:
+    doc.page_content = clean_text(doc.page_content)
+
+
+
+
+# Etape 3: Découpage en chunks:
+#----------------------------------
+
+
+# Utilisation du Recursive Character Text Splitter:
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+# Le chunk_size, c'est la taille des chunks, le chunk_overlap c'est le nombre de caractères
+# de chevauchement entre les chunks.
+r_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=300,
+    chunk_overlap=20,
+    separators=["\n\n", "\n", ". ", " ", ""]
+)
+
+chunks = r_splitter.split_documents(pages)
+
+# Etape 4: Embedding:
+#----------------------------------
+
+
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+
+# Embeddings
+embedding = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Vector DB
+vectorstore = Chroma.from_documents(chunks, embedding)
+
+
+# Etape 5:  Ajout d'un modèle de LLM:
+#----------------------------------
+
+# Créer le retriever: 
+# Le retriever est l'élément qui va aller chercher dans le corpus de chunks les éléments les plus pertinents à envoyer au LLM.
+# Plus les corpus sont longs et plus le retriever doit avoir un k élevé. ici, k=8
+# Lorsque je pose une question, le retriever la récupère, la convertit en vecteur et compare ce vecteur aux vecteurs stockés dans la base.
+retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+
+# Création du modèle LLM:
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+
+# Création du prompt: 
+from langchain_core.prompts import ChatPromptTemplate
+
+prompt = ChatPromptTemplate.from_template("""
+Réponds à la question en utilisant uniquement le contexte ci-dessous.
+
+Contexte:
+{context}
+
+Question:
+{question}
+""")
+
+# Transformation des vecteurs en texte:
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+# Construction du pipeline qui récupère les étapes précédentes: 
+rag_chain = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+)
+
+
+# Etape 6: Ajout de Tools:
+#----------------------------------
+
+# ===== OUTIL 1 : CALCULATRICE =====
+def calculator_tool(question: str):
+    try:
+        # extraire expression simple
+        return str(eval(question))
+    except:
+        return None
+
+
+# ===== OUTIL 2 : DATE =====
+import datetime
+
+def date_tool():
+    now = datetime.datetime.now()
+    return now.strftime("Nous sommes le %d/%m/%Y, %A")
+
+
+# ===== OUTIL 3 : RAG =====
+def rag_tool(question: str):
+    response = rag_chain.invoke(question)
+    docs = retriever.invoke(question)
+    return response.content, docs
+
+
+# ===== AGENT (LLM décide) =====
+def ask(question: str):
+
+    # Étape 1 : le LLM choisit l'outil
+    decision_prompt = f"""
+    Tu dois choisir quel outil utiliser pour répondre à la question.
+
+    Outils disponibles :
+    - calculator → pour les calculs mathématiques
+    - date → pour connaître la date
+    - rag → pour répondre avec les documents
+
+    Réponds UNIQUEMENT par :
+    calculator
+    date
+    rag
+
+    Question : {question}
+    """
+
+    decision = llm.invoke(decision_prompt).content.strip().lower()
+
+    # Étape 2 : exécution du bon outil
+
+    # 🧮 CALCUL
+    if "calculator" in decision:
+        result = calculator_tool(question)
+        return f"Résultat : {result}"
+
+    # 📅 DATE
+    elif "date" in decision:
+        return date_tool()
+
+    # 📚 RAG
+    else:
+        answer, docs = rag_tool(question)
+
+        sources = "\n".join(str(doc.metadata) for doc in docs)
+
+        return f"""
+Réponse :
+{answer}
+
+Sources :
+{sources}
+"""
+
+
+
+
+
+
+
+
+# Etape 7:  Poser une question:
+#----------------------------------
+print(ask("Combien font 25 * 48 ?"))
+print("-----")
+print(ask("Quelle est la date aujourd'hui ?"))
+print("-----")
+print(ask("Donnes moi la définition de l'assembleur"))
+
+
