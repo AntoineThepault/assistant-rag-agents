@@ -8,16 +8,18 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
-
+# from duckduckgo_search import DDGS
+from ddgs import DDGS
 from dotenv import load_dotenv, find_dotenv
 _ = load_dotenv(find_dotenv())
 
 
-# ===== TITRE =====
+# ===== TITRE de la page de navigateur =====
 st.title("Agent RAG + Calcul")
 
 
-# ===== CHARGEMENT DES DOCUMENTS (UNE FOIS) =====
+# ===== Chargement des documents: le Pipeline RAG =====
+
 @st.cache_resource
 def load_pipeline():
 
@@ -34,7 +36,8 @@ def load_pipeline():
         *loader4.load()
     ]
 
-    # Nettoyage
+    # Nettoyage des textes:
+
     def clean_text(text):
         text = text.replace("\xa0", " ").replace("\n", " ")
         return " ".join(text.split())
@@ -42,7 +45,9 @@ def load_pipeline():
     for doc in pages:
         doc.page_content = clean_text(doc.page_content)
 
-    # Split
+
+    # Split pour créer les chunks:
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=300,
         chunk_overlap=20,
@@ -51,16 +56,20 @@ def load_pipeline():
 
     chunks = splitter.split_documents(pages)
 
-    # Embeddings + DB
+    # Embeddings + DB des chunks, pour recherche ultérieure via le LLM:
+
     embedding = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = Chroma.from_documents(chunks, embedding)
 
     retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
-    # LLM
+
+
+
+    # Mise en place du LLM: gpt d'Open AI
     llm = ChatOpenAI(model="gpt-4o-mini")
 
-    # Prompt
+    # Prompt distribué au LLM:
     prompt = ChatPromptTemplate.from_template("""
     Réponds à la question en utilisant uniquement le contexte ci-dessous.
 
@@ -71,6 +80,8 @@ def load_pipeline():
     {question}
     """)
 
+
+# Revoir ce passage là. 
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
@@ -86,7 +97,12 @@ def load_pipeline():
 rag_chain, retriever, llm = load_pipeline()
 
 
-# ===== TOOLS =====
+
+# ===== Les TOOLS utilisés par le LLM pour remplir sa tâche =====
+
+
+
+# La calculatrice:
 def calculator_tool(question: str):
     try:
         expression = re.findall(r"[0-9\+\-\*/\.\(\)]+", question)
@@ -95,12 +111,29 @@ def calculator_tool(question: str):
     except:
         return None
 
-
+# Le début de calendrier (en chantier, ne répond pas aux questions sur le calendrier):
 def date_tool():
     now = datetime.datetime.now()
     return now.strftime("Nous sommes le %d/%m/%Y, %A")
 
 
+# Le navigateur web:
+def web_search_tool(question: str):
+    try:
+        with DDGS() as ddgs:
+            results = ddgs.text(question, max_results=3)
+
+            formatted = ""
+            for r in results:
+                formatted += f"{r['title']}\n{r['body']}\nSource: {r['href']}\n\n"
+
+            return formatted if formatted else "Aucun résultat trouvé."
+
+    except Exception as e:
+        return f"Erreur recherche web : {e}"
+
+
+# La recherche sur le RAG:
 def rag_tool(question: str):
     response = rag_chain.invoke(question)
     docs = retriever.invoke(question)
@@ -116,6 +149,7 @@ def ask(question: str):
     - calculator
     - date
     - rag
+    - web
 
     Question: {question}
 
@@ -126,20 +160,25 @@ def ask(question: str):
 
     if "calculator" in decision:
         result = calculator_tool(question)
-        return f"🧮 Résultat : {result}"
+        return f" Résultat : {result}"
 
     elif "date" in decision:
-        return f"📅 {date_tool()}"
+        return f" {date_tool()}"
+    
+    elif "web" in decision:
+        result = web_search_tool(question)
+        return f" Recherche web :\n{result}"
 
     else:
         answer, docs = rag_tool(question)
         sources = "\n".join(str(doc.metadata) for doc in docs)
 
         return f"""
-📚 Réponse :
+ Réponse :
 {answer}
 
-📄 Sources :
+
+ Sources :
 {sources}
 """
 
