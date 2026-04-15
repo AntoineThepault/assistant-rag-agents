@@ -9,3 +9,4 @@ streamlit
 duckduckgo-search
 openai
 tiktoken
+requests

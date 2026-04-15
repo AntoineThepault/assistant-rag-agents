@@ -2,7 +2,9 @@
 import streamlit as st
 import datetime
 import re
+import requests
 
+from functools import lru_cache
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -16,6 +18,8 @@ _ = load_dotenv(find_dotenv())
 
 # ===== TITRE de la page de navigateur =====
 st.title("Agent RAG + Calcul")
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 
 # ===== Chargement des documents: le Pipeline RAG =====
@@ -110,6 +114,199 @@ def calculator_tool(question: str):
         return str(eval(expression))
     except:
         return None
+    
+# ===== WEATHER TOOL =====
+
+@lru_cache(maxsize=128)
+def get_coordinates(city: str):
+    """
+    Recherche une ville et retourne ses coordonnées + infos utiles.
+    Cache les résultats pour éviter de refaire la requête à chaque fois.
+    """
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {
+        "name": city,
+        "count": 5,
+        "language": "fr",
+        "format": "json"
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    results = data.get("results")
+    if not results:
+        return None
+
+    # On prend le premier résultat pour rester simple en V1
+    best = results[0]
+
+    return {
+        "name": best.get("name"),
+        "country": best.get("country", ""),
+        "admin1": best.get("admin1", ""),
+        "latitude": best.get("latitude"),
+        "longitude": best.get("longitude"),
+        "timezone": best.get("timezone", "auto"),
+    }
+
+
+def extract_city(question: str):
+    """
+    Demande au LLM d'extraire uniquement la ville.
+    """
+    prompt = f"""
+Tu extrais uniquement le nom de la ville mentionnée dans la question.
+
+Règles :
+- Réponds uniquement par le nom de la ville.
+- Si aucune ville n'est mentionnée, réponds uniquement : inconnu
+- N'ajoute aucune ponctuation ni explication.
+
+Question : {question}
+"""
+    city = llm.invoke(prompt).content.strip()
+    return city
+
+
+def weather_code_to_text(code: int):
+    mapping = {
+        0: "ciel dégagé",
+        1: "principalement dégagé",
+        2: "partiellement nuageux",
+        3: "couvert",
+        45: "brouillard",
+        48: "brouillard givrant",
+        51: "bruine légère",
+        53: "bruine modérée",
+        55: "bruine dense",
+        56: "bruine verglaçante légère",
+        57: "bruine verglaçante dense",
+        61: "pluie faible",
+        63: "pluie modérée",
+        65: "pluie forte",
+        66: "pluie verglaçante légère",
+        67: "pluie verglaçante forte",
+        71: "neige faible",
+        73: "neige modérée",
+        75: "neige forte",
+        77: "grains de neige",
+        80: "averses faibles",
+        81: "averses modérées",
+        82: "averses violentes",
+        85: "averses de neige faibles",
+        86: "averses de neige fortes",
+        95: "orage",
+        96: "orage avec grêle légère",
+        99: "orage avec forte grêle",
+    }
+    return mapping.get(code, f"code météo {code}")
+
+
+def build_weather_summary(weather_data: dict, location: dict):
+    current = weather_data.get("current", {})
+    daily = weather_data.get("daily", {})
+
+    weather_text = weather_code_to_text(current.get("weather_code"))
+    temp = current.get("temperature_2m")
+    apparent = current.get("apparent_temperature")
+    humidity = current.get("relative_humidity_2m")
+    wind = current.get("wind_speed_10m")
+    precip = current.get("precipitation")
+
+    temp_max = None
+    temp_min = None
+    rain_sum = None
+
+    if daily:
+        if daily.get("temperature_2m_max"):
+            temp_max = daily["temperature_2m_max"][0]
+        if daily.get("temperature_2m_min"):
+            temp_min = daily["temperature_2m_min"][0]
+        if daily.get("precipitation_sum"):
+            rain_sum = daily["precipitation_sum"][0]
+
+    lines = [
+        f"Météo à {location['name']}, {location['country']}",
+        f"- Temps actuel : {weather_text}",
+        f"- Température : {temp}°C",
+        f"- Ressenti : {apparent}°C",
+        f"- Humidité : {humidity}%",
+        f"- Vent : {wind} km/h",
+        f"- Précipitations actuelles : {precip} mm",
+    ]
+
+    if temp_min is not None and temp_max is not None:
+        lines.append(f"- Aujourd’hui : min {temp_min}°C / max {temp_max}°C")
+
+    if rain_sum is not None:
+        lines.append(f"- Pluie prévue sur la journée : {rain_sum} mm")
+
+    return "\n".join(lines)
+
+
+def fetch_weather(latitude: float, longitude: float, timezone: str = "auto"):
+    """
+    Récupère météo actuelle + résumé du jour.
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "timezone": timezone,
+        "current": ",".join([
+            "temperature_2m",
+            "apparent_temperature",
+            "relative_humidity_2m",
+            "precipitation",
+            "weather_code",
+            "wind_speed_10m"
+        ]),
+        "daily": ",".join([
+            "weather_code",
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "precipitation_sum"
+        ]),
+        # Optionnel mais utile pour plus tard si vous voulez enrichir l’outil
+        "forecast_days": 1
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def weather_tool(question: str):
+    """
+    Outil météo principal.
+    """
+    try:
+        city = extract_city(question)
+
+        if city.lower() == "inconnu":
+            return "Je n’ai pas trouvé de ville dans ta question."
+
+        location = get_coordinates(city)
+
+        if not location:
+            return f"Je n’ai pas trouvé la ville : {city}"
+
+        weather_data = fetch_weather(
+            latitude=location["latitude"],
+            longitude=location["longitude"],
+            timezone=location["timezone"]
+        )
+
+        return build_weather_summary(weather_data, location)
+
+    except requests.Timeout:
+        return "Le service météo met trop de temps à répondre."
+    except requests.RequestException as e:
+        return f"Erreur réseau météo : {e}"
+    except Exception as e:
+        return f"Erreur météo : {e}"
 
 # Le début de calendrier (en chantier, ne répond pas aux questions sur le calendrier):
 def date_tool():
@@ -134,51 +331,131 @@ def web_search_tool(question: str):
 
 
 # La recherche sur le RAG:
-def rag_tool(question: str):
-    response = rag_chain.invoke(question)
+def rag_tool(question: str, history_text: str):
     docs = retriever.invoke(question)
+    context = "\n\n".join(doc.page_content for doc in docs)
+
+    rag_prompt = f"""
+Tu es un assistant spécialisé dans l'analyse de documents.
+
+Historique récent de la conversation :
+{history_text}
+
+Contexte documentaire :
+{context}
+
+Question actuelle :
+{question}
+
+Consignes :
+- Réponds de manière claire, naturelle et structurée.
+- Utilise uniquement les informations présentes dans le contexte documentaire.
+- Tiens compte de l'historique si la question est une relance.
+- Si l'information n'est pas dans le contexte, dis simplement que tu ne sais pas.
+- N'invente rien.
+"""
+
+    response = llm.invoke(rag_prompt)
     return response.content, docs
 
 
 # ===== AGENT =====
+def format_history(history, max_turns=5):
+    recent_history = history[-max_turns:]
+    formatted = []
+
+    for msg in recent_history:
+        role = "Utilisateur" if msg["role"] == "user" else "Assistant"
+        formatted.append(f"{role} : {msg['content']}")
+
+    return "\n".join(formatted)
+
+
 def ask(question: str):
+    history_text = format_history(st.session_state.history)
 
     decision_prompt = f"""
-    Tu dois choisir quel outil utiliser :
+Tu dois choisir exactement un seul outil parmi :
+- calculator
+- date
+- rag
+- web
+- weather
 
-    - calculator
-    - date
-    - rag
-    - web
+Historique récent :
+{history_text}
 
-    Question: {question}
+Question actuelle : {question}
 
-    Réponds uniquement par un mot.
-    """
+Règles :
+- Choisis "calculator" pour un calcul.
+- Choisis "date" pour une question sur la date du jour.
+- Choisis "weather" pour la météo, la température, la pluie, le climat actuel d'une ville.
+- Choisis "rag" si la question concerne un sujet académique, technique ou présent dans les documents (ex : architecture ordinateur, assembleur, cours).
+- Choisis "web" uniquement si la question nécessite une information externe ou récente (actualité, personnes, événements, etc.).
 
-    decision = llm.invoke(decision_prompt).content.lower()
+Réponds uniquement par un seul mot parmi :
+calculator
+date
+rag
+web
+weather
+"""
+
+    decision = llm.invoke(decision_prompt).content.strip().lower()
 
     if "calculator" in decision:
         result = calculator_tool(question)
-        return f" Résultat : {result}"
+        return f"Résultat : {result}"
 
     elif "date" in decision:
-        return f" {date_tool()}"
-    
+        return date_tool()
+
+    elif "weather" in decision:
+        result = weather_tool(question)
+        return f"Météo :\n{result}"
+
     elif "web" in decision:
-        result = web_search_tool(question)
-        return f" Recherche web :\n{result}"
+        web_results = web_search_tool(question)
+
+        web_prompt = f"""
+    Tu es un assistant.
+
+    Voici des résultats de recherche web :
+
+    {web_results}
+
+    Question :
+    {question}
+
+    Consignes :
+    - Donne une réponse claire et synthétique
+    - Utilise les informations pertinentes
+    - Ne copie pas les résultats tels quels
+    - Résume intelligemment
+
+    Réponse :
+    """
+
+        response = llm.invoke(web_prompt).content
+
+        return f"""
+    Réponse :
+    {response}
+
+    Sources :
+    {web_results}
+    """
 
     else:
-        answer, docs = rag_tool(question)
+        answer, docs = rag_tool(question, history_text)
         sources = "\n".join(str(doc.metadata) for doc in docs)
 
         return f"""
- Réponse :
+Réponse :
 {answer}
 
-
- Sources :
+Sources :
 {sources}
 """
 
@@ -190,5 +467,17 @@ if st.button("Envoyer"):
     if question:
         with st.spinner("Réflexion en cours..."):
             response = ask(question)
+
+        st.session_state.history.append({"role": "user", "content": question})
+        st.session_state.history.append({"role": "assistant", "content": response})
+
         st.write(response)
+
+if st.session_state.history:
+    st.subheader("Historique de conversation")
+    for msg in st.session_state.history:
+        if msg["role"] == "user":
+            st.markdown(f"**Toi :** {msg['content']}")
+        else:
+            st.markdown(f"**Assistant :** {msg['content']}")
         
