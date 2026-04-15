@@ -65,7 +65,7 @@ def load_pipeline():
     embedding = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = Chroma.from_documents(chunks, embedding)
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 
 
