@@ -11,6 +11,8 @@ from langchain_core.prompts import ChatPromptTemplate
 # from duckduckgo_search import DDGS
 from ddgs import DDGS
 from dotenv import load_dotenv, find_dotenv
+
+
 _ = load_dotenv(find_dotenv())
 
 
@@ -61,7 +63,7 @@ def load_pipeline():
     embedding = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = Chroma.from_documents(chunks, embedding)
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 
 
@@ -81,7 +83,7 @@ def load_pipeline():
     """)
 
 
-# Revoir ce passage là. 
+# Système de réponse: 
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
